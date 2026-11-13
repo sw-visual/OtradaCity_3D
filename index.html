@@ -187,16 +187,6 @@
       scene.environmentTexture = probe.cubeTexture;
       scene.environmentIntensity = 1.9;
 
-      // ---------- AO (опционально) ----------
-      if (USE_SSAO) {
-        const ssao = new BABYLON.SSAO2RenderingPipeline("ssao", scene, { ssaoRatio: 0.5, blurRatio: 0.5 });
-        ssao.radius = radius * 0.5;          // радиус затемнения в мировых единицах модели
-        ssao.totalStrength = 12.2;
-        ssao.base = 0.2;
-        scene.postProcessRenderPipelineManager.attachCamerasToRenderPipeline("ssao", camera);
-      }
-    });
-
     engine.runRenderLoop(() => scene.render());
     window.addEventListener("resize", () => engine.resize());
   </script>
