@@ -3,39 +3,46 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>3D модель</title>
+  <title>ОтрадаСити.3D</title>
   <script src="babylon.js"></script>
   <script src="babylonjs.loaders.min.js"></script>
   <style>
-    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: "Segoe UI", Arial, sans-serif; }
     #renderCanvas { width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
+    #modelInfo {
+      position: fixed; right: 16px; top: 14px;
+      pointer-events: none; user-select: none;
+    }
+    #modelInfo .title { color: #de6223; font-size: 14px; font-weight: 600; margin-bottom: 3px; }
+    #modelInfo .line  { color: #9aa0a6; font-size: 12px; line-height: 1.4; }
+    #modelInfo .line2 { color: #ccd4db; font-size: 12px; line-height: 1.4; }
   </style>
 </head>
 <body>
   <canvas id="renderCanvas"></canvas>
+  <div id="modelInfo">
+    <div class="title">ОТРАДА СИТИ</div>
+    <div class="line">Архитектурно-градостроительная концепция</div>
+    <div class="line2">Земельный участок = 7га</div>
+    <div class="line2">Площадь жилого фонда = 58 220 м²</div>
+  </div>
   <script>
     const canvas = document.getElementById("renderCanvas");
     const engine = new BABYLON.Engine(canvas, true);
     const scene = new BABYLON.Scene(engine);
     scene.clearColor = new BABYLON.Color4(0, 0, 0, 1);
 
-    // ---------- DRACO (сжатые модели) ----------
-    BABYLON.DracoCompression.Configuration = {
-      decoder: {
-        wasmUrl: "https://cdn.babylonjs.com/draco_wasm_wrapper_gltf.js",
-        wasmBinaryUrl: "https://cdn.babylonjs.com/draco_decoder_gltf.wasm",
-        fallbackUrl: "https://cdn.babylonjs.com/draco_decoder_gltf.js"
-      }
-    };
+    // ---------- ФЛАГИ ----------
+    const USE_SSAO = false;   // true включает экранный AO (тяжелее для телефона)
 
-    // ---------- БЛОКИРОВКА ПКМ-ЖЕСТОВ БРАУЗЕРА ----------
+    // ---------- БЛОКИРОВКА ПКМ-ЖЕСТОВ ----------
     canvas.addEventListener("contextmenu", e => e.preventDefault());
-    canvas.addEventListener("mousedown", e => {
-      if (e.button === 2) e.preventDefault();
-    }, true);
+    canvas.addEventListener("mousedown", e => { if (e.button === 2) e.preventDefault(); }, true);
 
-    // ---------- ГРАДИЕНТНОЕ НЕБО ДЛЯ ОТРАЖЕНИЙ ----------
-    // Невидимо для основной камеры, но попадает в ReflectionProbe
+    // ---------- НАПРАВЛЕНИЕ СОЛНЦА ----------
+    const sunDirection = new BABYLON.Vector3(0.2, 0.5, 0.5).normalize();
+
+    // ---------- ГРАДИЕНТНОЕ ОКРУЖЕНИЕ ДЛЯ ОТРАЖЕНИЙ ----------
     BABYLON.Effect.ShadersStore["skyVertexShader"] = `
       precision highp float;
       attribute vec3 position;
@@ -53,29 +60,41 @@
 
       void main() {
         vec3 d = normalize(vPos);
-        float h = d.y;                                  // -1 низ, 1 верх
+        float h = d.y;                                   // -1 низ, 1 верх
 
-        vec3 bottom  = vec3(0.00, 0.00, 0.00);          // черный низ
-        vec3 horizon = vec3(0.45, 0.48, 0.52);          // серая полоса у горизонта
-        vec3 top     = vec3(0.78, 0.84, 0.92);          // холодный светло-серый верх
+        // Верхняя полусфера (небо): как и раньше
+        vec3 horizon = vec3(0.45, 0.48, 0.52);
+        vec3 zenith  = vec3(0.92, 0.96, 1.00);
+        vec3 col = mix(horizon, zenith, smoothstep(0.0, 0.9, h));
 
-        // Базовый вертикальный градиент
-        vec3 col = mix(horizon, top, smoothstep(0.0, 0.9, h));
-        col = mix(bottom, col, smoothstep(-0.05, 0.25, h));
+        // Нижняя полусфера: у горизонта черный, как и было
+        vec3 nadirBlack = vec3(0.0, 0.0, 0.0);
+        vec3 groundGrey = vec3(0.55, 0.56, 0.58);        // светло-серая земля
+        // Угол взгляда вниз от горизонта: 0 у горизонта, 1 строго вниз
+        // 50 градусов вниз от горизонта соответствует h = -sin(50°) ≈ -0.766
+        float down = clamp(-h, 0.0, 1.0);
+        // Чёрный держится до ~ 0.0, серый появляется примерно с 50 градусов
+        float greyMix = smoothstep(0.55, 0.77, down);
+        vec3 ground = mix(nadirBlack, groundGrey, greyMix);
 
-        // Мягкая горизонтальная "оттяжка" у горизонта
+        // Переход горизонт: ниже горизонта берём землю, выше - небо
+        col = mix(ground, col, smoothstep(-0.05, 0.25, h));
+
+        // Оттяжка у горизонта
         float band = exp(-pow((h - 0.15) * 3.5, 2.0));
-        col += vec3(0.25, 0.27, 0.30) * band;
+        col += vec3(0.35, 0.38, 0.42) * band;
 
-        // Рассеянное солнце: широкое мягкое пятно и более яркое ядро
+        // Противоположная от солнца полусфера
+        float opp = max(dot(d, -normalize(sunDir)), 0.0);
+        col += vec3(0.20, 0.22, 0.26) * pow(opp, 2.0);
+
+        // Рассеянное солнце
         float s = max(dot(d, normalize(sunDir)), 0.0);
-        col += vec3(1.00, 0.97, 0.90) * pow(s, 4.0)  * 0.55;   // широкий ореол
-        col += vec3(1.00, 0.98, 0.95) * pow(s, 32.0) * 1.20;   // яркое ядро
+        col += vec3(1.00, 0.97, 0.90) * pow(s, 4.0)  * 0.55;
+        col += vec3(1.00, 0.98, 0.95) * pow(s, 32.0) * 1.20;
 
         gl_FragColor = vec4(col, 1.0);
       }`;
-
-    const sunDirection = new BABYLON.Vector3(0.45, 0.55, 0.35).normalize();
 
     const sky = BABYLON.MeshBuilder.CreateSphere("sky", {
       diameter: 1000,
@@ -87,7 +106,7 @@
     });
     skyMat.setVector3("sunDir", sunDirection);
     sky.material = skyMat;
-    sky.layerMask = 0x10000000;   // видна только для ReflectionProbe
+    sky.layerMask = 0x10000000;
     sky.isPickable = false;
 
     // ---------- КАМЕРА ----------
@@ -95,59 +114,87 @@
       "cam", -Math.PI / 4, Math.PI / 3.2, 50, BABYLON.Vector3.Zero(), scene
     );
     camera.attachControl(canvas, true);
-    camera.layerMask = 0x0FFFFFFF;  // основная камера не видит небо
+    camera.layerMask = 0x0FFFFFFF;
 
     camera.angularSensibilityX = 1000;
     camera.angularSensibilityY = 1000;
-
     camera.panningSensibility = 50;
     camera.inputs.attached.pointers.buttons = [0, 1, 2];
     camera.inputs.attached.pointers.panningMouseButton = 2;
-
     camera.wheelPrecision = 2;
     camera.pinchPrecision = 20;
 
-    // ---------- СВЕТ ----------
-    const light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0.5, 0.7, 0.3), scene);
-    light.intensity = 0.8;
+    // ---------- СВЕТ И ТЕНИ ----------
+    const hemi = new BABYLON.HemisphericLight("hemi", new BABYLON.Vector3(0, 1, 0), scene);
+    hemi.intensity = 0.25;
+
+    const sun = new BABYLON.DirectionalLight("sun", sunDirection.scale(-1), scene);
+    sun.intensity = 3.0;
+
+    const shadowGen = new BABYLON.ShadowGenerator(2048, sun);
+    shadowGen.useBlurExponentialShadowMap = false;
+    shadowGen.usePercentageCloserFiltering = true;
+    shadowGen.filteringQuality = BABYLON.ShadowGenerator.QUALITY_HIGH;
+    shadowGen.bias = 0.0005;
+    shadowGen.normalBias = 0.02;
+    shadowGen.darkness = 0.25;
 
     // ---------- ЗАГРУЗКА МОДЕЛИ ----------
     BABYLON.SceneLoader.Append("./", "OtradaCity_3D.glb", scene, () => {
       let min = new BABYLON.Vector3(Infinity, Infinity, Infinity);
       let max = new BABYLON.Vector3(-Infinity, -Infinity, -Infinity);
-      scene.meshes.forEach(mesh => {
-        if (mesh === sky || !mesh.isVisible || mesh.getTotalVertices() === 0) return;
+      const modelMeshes = scene.meshes.filter(m => m !== sky && m.isVisible && m.getTotalVertices() > 0);
+
+      modelMeshes.forEach(mesh => {
         mesh.computeWorldMatrix(true);
         const bb = mesh.getBoundingInfo().boundingBox;
         min = BABYLON.Vector3.Minimize(min, bb.minimumWorld);
         max = BABYLON.Vector3.Maximize(max, bb.maximumWorld);
+        shadowGen.addShadowCaster(mesh);
+        mesh.receiveShadows = true;
       });
 
       const center = BABYLON.Vector3.Center(min, max);
       const radius = max.subtract(min).length() / 2;
 
-      // Стартовая камера: 2 м над pivot point, вся модель в кадре
+      // Солнце охватывает всю модель
+      sun.position = center.add(sunDirection.scale(radius * 3));
+      sun.shadowMinZ = radius * 0.1;
+      sun.shadowMaxZ = radius * 8;
+      sun.orthoLeft = -radius * 1.5;
+      sun.orthoRight = radius * 1.5;
+      sun.orthoBottom = -radius * 1.5;
+      sun.orthoTop = radius * 1.5;
+
+      // Стартовая камера
       const cameraHeight = 2;
       camera.setTarget(center);
       const dist = radius * 2.2;
       camera.alpha = -Math.PI / 4;
       camera.beta = Math.PI / 2 - Math.atan2(cameraHeight, dist);
       camera.radius = dist;
-
       camera.lowerRadiusLimit = radius * 0.05;
       camera.upperRadiusLimit = radius * 10;
       camera.minZ = radius / 100;
       camera.maxZ = radius * 100;
 
-      // Небо центрируем на модели
       sky.position = center.clone();
 
-      // Карта отражений из градиентного неба
+      // Отражения: окружение из градиентного неба и земли
       const probe = new BABYLON.ReflectionProbe("probe", 256, scene);
       probe.position = center.clone();
       probe.renderList.push(sky);
       scene.environmentTexture = probe.cubeTexture;
-      scene.environmentIntensity = 2.1;   // яркость отражений, меняйте здесь
+      scene.environmentIntensity = 1.9;
+
+      // ---------- AO (опционально) ----------
+      if (USE_SSAO) {
+        const ssao = new BABYLON.SSAO2RenderingPipeline("ssao", scene, { ssaoRatio: 0.5, blurRatio: 0.5 });
+        ssao.radius = radius * 0.5;          // радиус затемнения в мировых единицах модели
+        ssao.totalStrength = 12.2;
+        ssao.base = 0.2;
+        scene.postProcessRenderPipelineManager.attachCamerasToRenderPipeline("ssao", camera);
+      }
     });
 
     engine.runRenderLoop(() => scene.render());
