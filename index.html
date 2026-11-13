@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>3D модель</title>
+  <script src="babylon.js"></script>
+  <script src="babylonjs.loaders.min.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+    #renderCanvas { width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
+  </style>
+</head>
+<body>
+  <canvas id="renderCanvas"></canvas>
+  <script>
+    const canvas = document.getElementById("renderCanvas");
+    const engine = new BABYLON.Engine(canvas, true);
+    const scene = new BABYLON.Scene(engine);
+    scene.clearColor = new BABYLON.Color4(0, 0, 0, 1);
+
+    // ---------- DRACO (сжатые модели) ----------
+    BABYLON.DracoCompression.Configuration = {
+      decoder: {
+        wasmUrl: "https://cdn.babylonjs.com/draco_wasm_wrapper_gltf.js",
+        wasmBinaryUrl: "https://cdn.babylonjs.com/draco_decoder_gltf.wasm",
+        fallbackUrl: "https://cdn.babylonjs.com/draco_decoder_gltf.js"
+      }
+    };
+
+    // ---------- БЛОКИРОВКА ПКМ-ЖЕСТОВ БРАУЗЕРА ----------
+    canvas.addEventListener("contextmenu", e => e.preventDefault());
+    canvas.addEventListener("mousedown", e => {
+      if (e.button === 2) e.preventDefault();
+    }, true);
+
+    // ---------- ГРАДИЕНТНОЕ НЕБО ДЛЯ ОТРАЖЕНИЙ ----------
+    // Невидимо для основной камеры, но попадает в ReflectionProbe
+    BABYLON.Effect.ShadersStore["skyVertexShader"] = `
+      precision highp float;
+      attribute vec3 position;
+      uniform mat4 worldViewProjection;
+      varying vec3 vPos;
+      void main() {
+        vPos = position;
+        gl_Position = worldViewProjection * vec4(position, 1.0);
+      }`;
+
+    BABYLON.Effect.ShadersStore["skyFragmentShader"] = `
+      precision highp float;
+      varying vec3 vPos;
+      uniform vec3 sunDir;
+
+      void main() {
+        vec3 d = normalize(vPos);
+        float h = d.y;                                  // -1 низ, 1 верх
+
+        vec3 bottom  = vec3(0.00, 0.00, 0.00);          // черный низ
+        vec3 horizon = vec3(0.45, 0.48, 0.52);          // серая полоса у горизонта
+        vec3 top     = vec3(0.78, 0.84, 0.92);          // холодный светло-серый верх
+
+        // Базовый вертикальный градиент
+        vec3 col = mix(horizon, top, smoothstep(0.0, 0.9, h));
+        col = mix(bottom, col, smoothstep(-0.05, 0.25, h));
+
+        // Мягкая горизонтальная "оттяжка" у горизонта
+        float band = exp(-pow((h - 0.15) * 3.5, 2.0));
+        col += vec3(0.25, 0.27, 0.30) * band;
+
+        // Рассеянное солнце: широкое мягкое пятно и более яркое ядро
+        float s = max(dot(d, normalize(sunDir)), 0.0);
+        col += vec3(1.00, 0.97, 0.90) * pow(s, 4.0)  * 0.55;   // широкий ореол
+        col += vec3(1.00, 0.98, 0.95) * pow(s, 32.0) * 1.20;   // яркое ядро
+
+        gl_FragColor = vec4(col, 1.0);
+      }`;
+
+    const sunDirection = new BABYLON.Vector3(0.45, 0.55, 0.35).normalize();
+
+    const sky = BABYLON.MeshBuilder.CreateSphere("sky", {
+      diameter: 1000,
+      sideOrientation: BABYLON.Mesh.BACKSIDE
+    }, scene);
+    const skyMat = new BABYLON.ShaderMaterial("skyMat", scene, "sky", {
+      attributes: ["position"],
+      uniforms: ["worldViewProjection", "sunDir"]
+    });
+    skyMat.setVector3("sunDir", sunDirection);
+    sky.material = skyMat;
+    sky.layerMask = 0x10000000;   // видна только для ReflectionProbe
+    sky.isPickable = false;
+
+    // ---------- КАМЕРА ----------
+    const camera = new BABYLON.ArcRotateCamera(
+      "cam", -Math.PI / 4, Math.PI / 3.2, 50, BABYLON.Vector3.Zero(), scene
+    );
+    camera.attachControl(canvas, true);
+    camera.layerMask = 0x0FFFFFFF;  // основная камера не видит небо
+
+    camera.angularSensibilityX = 1000;
+    camera.angularSensibilityY = 1000;
+
+    camera.panningSensibility = 50;
+    camera.inputs.attached.pointers.buttons = [0, 1, 2];
+    camera.inputs.attached.pointers.panningMouseButton = 2;
+
+    camera.wheelPrecision = 2;
+    camera.pinchPrecision = 20;
+
+    // ---------- СВЕТ ----------
+    const light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0.5, 0.7, 0.3), scene);
+    light.intensity = 0.8;
+
+    // ---------- ЗАГРУЗКА МОДЕЛИ ----------
+    BABYLON.SceneLoader.Append("./", "OtradaCity_3D.glb", scene, () => {
+      let min = new BABYLON.Vector3(Infinity, Infinity, Infinity);
+      let max = new BABYLON.Vector3(-Infinity, -Infinity, -Infinity);
+      scene.meshes.forEach(mesh => {
+        if (mesh === sky || !mesh.isVisible || mesh.getTotalVertices() === 0) return;
+        mesh.computeWorldMatrix(true);
+        const bb = mesh.getBoundingInfo().boundingBox;
+        min = BABYLON.Vector3.Minimize(min, bb.minimumWorld);
+        max = BABYLON.Vector3.Maximize(max, bb.maximumWorld);
+      });
+
+      const center = BABYLON.Vector3.Center(min, max);
+      const radius = max.subtract(min).length() / 2;
+
+      // Стартовая камера: 2 м над pivot point, вся модель в кадре
+      const cameraHeight = 2;
+      camera.setTarget(center);
+      const dist = radius * 2.2;
+      camera.alpha = -Math.PI / 4;
+      camera.beta = Math.PI / 2 - Math.atan2(cameraHeight, dist);
+      camera.radius = dist;
+
+      camera.lowerRadiusLimit = radius * 0.05;
+      camera.upperRadiusLimit = radius * 10;
+      camera.minZ = radius / 100;
+      camera.maxZ = radius * 100;
+
+      // Небо центрируем на модели
+      sky.position = center.clone();
+
+      // Карта отражений из градиентного неба
+      const probe = new BABYLON.ReflectionProbe("probe", 256, scene);
+      probe.position = center.clone();
+      probe.renderList.push(sky);
+      scene.environmentTexture = probe.cubeTexture;
+      scene.environmentIntensity = 2.1;   // яркость отражений, меняйте здесь
+    });
+
+    engine.runRenderLoop(() => scene.render());
+    window.addEventListener("resize", () => engine.resize());
+  </script>
+</body>
+</html>
